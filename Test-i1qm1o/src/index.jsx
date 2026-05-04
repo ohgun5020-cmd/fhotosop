@@ -118,6 +118,36 @@ function moveItem(items, fromIndex, toIndex) {
   return next;
 }
 
+function setDragPreview(event, item, index) {
+  const transfer = event && event.dataTransfer;
+  if (!transfer) {
+    return;
+  }
+  try {
+    transfer.effectAllowed = "move";
+    transfer.dropEffect = "move";
+    transfer.setData("text/plain", item.name);
+  } catch (error) {
+  }
+  if (!transfer.setDragImage || !document.body) {
+    return;
+  }
+  const preview = document.createElement("div");
+  preview.className = "drag-preview";
+  preview.textContent = `${String(index + 1).padStart(2, "0")}  ${item.name}`;
+  document.body.appendChild(preview);
+  try {
+    transfer.setDragImage(preview, 12, 12);
+  } catch (error) {
+  }
+  setTimeout(() => {
+    try {
+      preview.remove();
+    } catch (error) {
+    }
+  }, 0);
+}
+
 function roundPixel(value) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(1, Math.round(number)) : 1;
@@ -282,9 +312,54 @@ async function stitchPsdFiles(items, options, onProgress) {
   return metrics;
 }
 
+function ControlButton({ children, className = "", disabled = false, onClick, title, ariaLabel }) {
+  function handleClick(event) {
+    if (disabled) {
+      return;
+    }
+    if (onClick) {
+      onClick(event);
+    }
+  }
+
+  function handleKeyDown(event) {
+    if (disabled || !onClick) {
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onClick(event);
+    }
+  }
+
+  return (
+    <div
+      className={`control-button ${className}${disabled ? " disabled" : ""}`}
+      role="button"
+      tabIndex={disabled ? -1 : 0}
+      aria-disabled={disabled ? "true" : "false"}
+      aria-label={ariaLabel}
+      title={title}
+      onClick={handleClick}
+      onKeyDown={handleKeyDown}
+    >
+      {children}
+    </div>
+  );
+}
+
+function ChevronIcon({ direction }) {
+  const points = direction === "up" ? "4 10 8 6 12 10" : "4 6 8 10 12 6";
+  return (
+    <svg className="chevron-icon" viewBox="0 0 16 16" aria-hidden="true">
+      <polyline points={points} />
+    </svg>
+  );
+}
+
 function App() {
   const [items, setItems] = useState([]);
-  const [dragIndex, setDragIndex] = useState(null);
+  const [draggingId, setDraggingId] = useState(null);
   const [gap, setGap] = useState(0);
   const [closeSources, setCloseSources] = useState(true);
   const [activeTab, setActiveTab] = useState("files");
@@ -357,79 +432,114 @@ function App() {
     setItems(current => moveItem(current, index, index + 1));
   }
 
-  function handleDrop(index) {
-    if (dragIndex === null) {
+  function handleDragStart(event, item, index) {
+    if (busy) {
       return;
     }
-    setItems(current => moveItem(current, dragIndex, index));
-    setDragIndex(null);
+    setDraggingId(item.id);
+    setDragPreview(event, item, index);
+  }
+
+  function handleDragOver(event, targetId) {
+    event.preventDefault();
+    if (!draggingId || draggingId === targetId) {
+      return;
+    }
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+    setItems(current => {
+      const fromIndex = current.findIndex(item => item.id === draggingId);
+      const toIndex = current.findIndex(item => item.id === targetId);
+      return moveItem(current, fromIndex, toIndex);
+    });
+  }
+
+  function finishDrag() {
+    setDraggingId(null);
   }
 
   return (
     <div className="app-shell">
       <nav className="tabs" aria-label="PSD Stitcher sections">
-        <button
-          className={activeTab === "files" ? "active" : ""}
-          type="button"
+        <ControlButton
+          className={`tab-button ${activeTab === "files" ? "active" : ""}`}
           onClick={() => setActiveTab("files")}
         >
           파일
-        </button>
-        <button
-          className={activeTab === "settings" ? "active" : ""}
-          type="button"
+        </ControlButton>
+        <ControlButton
+          className={`tab-button ${activeTab === "settings" ? "active" : ""}`}
           onClick={() => setActiveTab("settings")}
         >
           설정
-        </button>
+        </ControlButton>
       </nav>
 
       {activeTab === "files" && (
         <div className="tab-panel">
           <section className="toolbar">
-            <button className="primary" type="button" onClick={chooseFiles} disabled={busy}>
+            <ControlButton className="primary" onClick={chooseFiles} disabled={busy}>
               PSD 파일 열기
-            </button>
-            <button className="secondary" type="button" onClick={() => setItems(sortItems(items))} disabled={busy || items.length < 2}>
-              이름순 정렬
-            </button>
-            <button className="primary" type="button" onClick={runStitch} disabled={busy || items.length === 0}>
-              합치기 실행
-            </button>
+            </ControlButton>
           </section>
 
-          <div className="section-title">선택한 PSD <span>{items.length}</span></div>
+          <div className="list-header">
+            <div className="section-title">선택된 파일 리스트 <span>{items.length}</span></div>
+            <ControlButton className="list-sort" onClick={() => setItems(sortItems(items))} disabled={busy || items.length < 2}>
+              이름순 정렬
+            </ControlButton>
+          </div>
           <section className="file-list" aria-label="PSD order">
             {items.length === 0 ? (
               <div className="empty">PSD/PSB 파일을 여러 개 선택하면 여기에 순서가 표시됩니다.</div>
             ) : (
-              items.map((item, index) => {
-                const metric = lastMetrics.find(entry => entry.id === item.id);
-                return (
-                  <div
-                    className="file-row"
-                    key={item.id}
-                    draggable={!busy}
-                    onDragStart={() => setDragIndex(index)}
-                    onDragOver={event => event.preventDefault()}
-                    onDrop={() => handleDrop(index)}
-                  >
-                    <div className="file-icon" aria-hidden="true" />
-                    <div className="file-main">
-                      <strong>{item.name}</strong>
+              <div className="file-table">
+                <div className="file-row file-row-head">
+                  <div className="index">순서</div>
+                  <div className="file-main">파일명</div>
+                  <div className="row-actions">이동</div>
+                </div>
+                {items.map((item, index) => {
+                  return (
+                    <div
+                      className={`file-row ${item.id === draggingId ? "dragging" : ""}`}
+                      key={item.id}
+                      draggable={!busy}
+                      onDragStart={event => handleDragStart(event, item, index)}
+                      onDragEnter={event => handleDragOver(event, item.id)}
+                      onDragOver={event => handleDragOver(event, item.id)}
+                      onDrop={finishDrag}
+                      onDragEnd={finishDrag}
+                    >
+                      <div className="index">{String(index + 1).padStart(2, "0")}</div>
+                      <div className="file-main">
+                        <strong>{item.name}</strong>
+                      </div>
+                      <div className="row-actions">
+                        <ControlButton className="icon-button arrow-up" ariaLabel="위로 이동" title="위로 이동" onClick={() => moveUp(index)} disabled={busy || index === 0}>
+                          <ChevronIcon direction="up" />
+                        </ControlButton>
+                        <ControlButton className="icon-button arrow-down" ariaLabel="아래로 이동" title="아래로 이동" onClick={() => moveDown(index)} disabled={busy || index === items.length - 1}>
+                          <ChevronIcon direction="down" />
+                        </ControlButton>
+                      </div>
                     </div>
-                    <div className="file-date">
-                      {metric ? `${metric.width} x ${metric.height}px` : item.modifiedLabel}
-                    </div>
-                    <div className="index">{String(index + 1).padStart(2, "0")}</div>
-                    <div className="row-actions">
-                      <button type="button" aria-label="위로 이동" title="위로 이동" onClick={() => moveUp(index)} disabled={busy || index === 0}>▲</button>
-                      <button type="button" aria-label="아래로 이동" title="아래로 이동" onClick={() => moveDown(index)} disabled={busy || index === items.length - 1}>▼</button>
-                    </div>
-                  </div>
-                );
-              })
+                  );
+                })}
+              </div>
             )}
+          </section>
+
+          <section className="bottom-panel">
+            <section className="status">
+              <strong>{busy ? "실행 중" : "상태"}</strong>
+              <span>{items.length > 0 ? `${items.length}개 선택됨 · ${status}` : status}</span>
+              {totalPreviewHeight !== null && <em>최근 결과 높이: {totalPreviewHeight}px</em>}
+            </section>
+            <ControlButton className="primary merge-button" onClick={runStitch} disabled={busy || items.length === 0}>
+              PSD 합치기
+            </ControlButton>
           </section>
         </div>
       )}
@@ -447,11 +557,13 @@ function App() {
         </section>
       )}
 
-      <section className="status">
-        <strong>{busy ? "실행 중" : "상태"}</strong>
-        <span>{items.length > 0 ? `${items.length}개 선택됨 · ${status}` : status}</span>
-        {totalPreviewHeight !== null && <em>최근 결과 높이: {totalPreviewHeight}px</em>}
-      </section>
+      {activeTab === "settings" && (
+        <section className="status">
+          <strong>{busy ? "실행 중" : "상태"}</strong>
+          <span>{items.length > 0 ? `${items.length}개 선택됨 · ${status}` : status}</span>
+          {totalPreviewHeight !== null && <em>최근 결과 높이: {totalPreviewHeight}px</em>}
+        </section>
+      )}
     </div>
   );
 }

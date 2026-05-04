@@ -135,6 +135,17 @@ Copy-Item -Path "C:\Users\메이크잇_03\Desktop\fhotohop\Test-i1qm1o\dist\*" -
 - 원본 PSD 탭 닫기 옵션
 - 선택한 순서대로 새 Photoshop 문서에 세로 병합
 
+## UI 구현 메모
+
+- UXP/Photoshop 패널에서 HTML `<button>` 태그는 Photoshop 네이티브 버튼 스타일을 강하게 탑니다.
+- 이 영향으로 CSS의 `font-size`를 `9px`, `5px`, `!important`로 지정해도 실제 화면에서는 글자 크기가 거의 변하지 않을 수 있습니다.
+- 실제 테스트에서 `<button>`에 `font-size: 5px !important`를 줬는데도 화면에서는 약 11px처럼 보였습니다.
+- 해결 방식은 `<button>` 대신 `div role="button"` 기반의 커스텀 버튼 컴포넌트(`ControlButton`)를 사용하는 것입니다.
+- 현재 `파일`, `설정`, `PSD 파일 열기`, `이름순 정렬`, `합치기 실행`, 순서 이동 화살표는 모두 `.control-button` 커스텀 버튼을 사용합니다.
+- 커스텀 버튼 전환 후 `font-size: 5px` 테스트에서 글자가 매우 작게 표시되어 CSS 적용이 정상 동작함을 확인했습니다.
+- 현재 버튼/탭 폰트 크기는 `9px`입니다.
+- 한글 폰트는 돋움처럼 보이는 폴백을 피하기 위해 `"Adobe Clean", "Segoe UI", "Malgun Gothic", sans-serif` 순서로 지정했습니다.
+
 ## 다음 개선 후보
 
 - 병합 후 PSD 저장 버튼
