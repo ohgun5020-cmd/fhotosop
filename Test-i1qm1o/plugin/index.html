@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <script>
+    try {
+      if (typeof global !== "undefined") {
+        global.screen = global.screen || {};
+      }
+      if (window.WebSocket && window.WebSocket.prototype) {
+        window.WebSocket.prototype.OPEN = 1;
+      }
+    } catch (error) {}
+  </script>
+  <script src="index.js"></script>    
+</head>
+<body>
+</body>
+</html>

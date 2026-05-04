@@ -1,0 +1,8 @@
+node_modules/
+dist/
+Test-i1qm1o/plugin/index.js
+.DS_Store
+Thumbs.db
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
