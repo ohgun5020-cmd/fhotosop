@@ -897,6 +897,17 @@ function App() {
     setLastResultSize(null);
   }
 
+  function clearItems() {
+    setItems([]);
+    setSelectedIds([]);
+    setSelectionAnchorId(null);
+    setDraggingId(null);
+    setMarquee(null);
+    setLastResultSize(null);
+    setStatus("목록을 비웠습니다.");
+    closeContextMenu();
+  }
+
   function getRangeItemIds(anchorId, targetId) {
     const anchorIndex = items.findIndex(item => item.id === anchorId);
     const targetIndex = items.findIndex(item => item.id === targetId);
@@ -1112,6 +1123,24 @@ function App() {
     });
   }
 
+  function openListContextMenu(event) {
+    if (busy || items.length === 0 || event.target.closest(".file-row")) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    closeSortMenu();
+    const menuWidth = 126;
+    const menuHeight = 24;
+    const viewportWidth = typeof window !== "undefined" && window.innerWidth ? window.innerWidth : event.clientX + menuWidth;
+    const viewportHeight = typeof window !== "undefined" && window.innerHeight ? window.innerHeight : event.clientY + menuHeight;
+    setContextMenu({
+      type: "list",
+      x: Math.max(4, Math.min(event.clientX, viewportWidth - menuWidth - 4)),
+      y: Math.max(4, Math.min(event.clientY, viewportHeight - menuHeight - 4))
+    });
+  }
+
   function handleRowMouseDown(event, item) {
     if (busy || event.button !== 0 || isRowControlTarget(event.target)) {
       return;
@@ -1183,7 +1212,7 @@ function App() {
               </span>
             </ControlButton>
           </div>
-          <section className="file-list" aria-label="PSD order" onMouseDown={startMarqueeSelection} onScroll={closeMenus}>
+          <section className="file-list" aria-label="PSD order" onMouseDown={startMarqueeSelection} onContextMenu={openListContextMenu} onScroll={closeMenus}>
             {items.length === 0 ? (
               <div className="empty">PSD/PSB 파일을 여러 개 선택하면 여기에 순서가 표시됩니다.</div>
             ) : (
@@ -1253,15 +1282,23 @@ function App() {
               onClick={event => event.stopPropagation()}
               onContextMenu={event => event.preventDefault()}
             >
-              <div className="context-menu-item" role="menuitem" tabIndex={0} onClick={() => removeItem(contextMenu.itemId)} onKeyDown={event => handleContextMenuKey(event, () => removeItem(contextMenu.itemId))}>
-                {contextMenu.itemIds && contextMenu.itemIds.length > 1 ? "선택 항목 제거" : "목록에서 제거"}
-              </div>
-              <div className="context-menu-item" role="menuitem" tabIndex={0} onClick={() => moveItemToStart(contextMenu.itemId)} onKeyDown={event => handleContextMenuKey(event, () => moveItemToStart(contextMenu.itemId))}>
-                {contextMenu.itemIds && contextMenu.itemIds.length > 1 ? "선택 항목 맨 위로" : "맨 위로"}
-              </div>
-              <div className="context-menu-item" role="menuitem" tabIndex={0} onClick={() => moveItemToEnd(contextMenu.itemId)} onKeyDown={event => handleContextMenuKey(event, () => moveItemToEnd(contextMenu.itemId))}>
-                {contextMenu.itemIds && contextMenu.itemIds.length > 1 ? "선택 항목 맨 아래로" : "맨 아래로"}
-              </div>
+              {contextMenu.type === "list" ? (
+                <div className="context-menu-item" role="menuitem" tabIndex={0} onClick={clearItems} onKeyDown={event => handleContextMenuKey(event, clearItems)}>
+                  전체 삭제
+                </div>
+              ) : (
+                <>
+                  <div className="context-menu-item" role="menuitem" tabIndex={0} onClick={() => removeItem(contextMenu.itemId)} onKeyDown={event => handleContextMenuKey(event, () => removeItem(contextMenu.itemId))}>
+                    {contextMenu.itemIds && contextMenu.itemIds.length > 1 ? "선택 항목 제거" : "목록에서 제거"}
+                  </div>
+                  <div className="context-menu-item" role="menuitem" tabIndex={0} onClick={() => moveItemToStart(contextMenu.itemId)} onKeyDown={event => handleContextMenuKey(event, () => moveItemToStart(contextMenu.itemId))}>
+                    {contextMenu.itemIds && contextMenu.itemIds.length > 1 ? "선택 항목 맨 위로" : "맨 위로"}
+                  </div>
+                  <div className="context-menu-item" role="menuitem" tabIndex={0} onClick={() => moveItemToEnd(contextMenu.itemId)} onKeyDown={event => handleContextMenuKey(event, () => moveItemToEnd(contextMenu.itemId))}>
+                    {contextMenu.itemIds && contextMenu.itemIds.length > 1 ? "선택 항목 맨 아래로" : "맨 아래로"}
+                  </div>
+                </>
+              )}
             </div>
           )}
 
