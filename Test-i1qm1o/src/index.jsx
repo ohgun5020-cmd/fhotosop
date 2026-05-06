@@ -5,10 +5,11 @@ import "./styles.css";
 import { entrypoints } from "uxp";
 import { PanelController } from "./controllers/PanelController.jsx";
 
-const { app, core, constants } = require("photoshop");
+const { app, action, core, constants } = require("photoshop");
 const { storage } = require("uxp");
 
 const fs = storage.localFileSystem;
+const binaryReadFormat = storage.formats && storage.formats.binary ? storage.formats.binary : "binary";
 
 function stripExtension(name) {
   return String(name || "").replace(/\.[^.]+$/, "");
@@ -123,6 +124,114 @@ function roundPixel(value) {
   return Number.isFinite(number) ? Math.max(1, Math.round(number)) : 1;
 }
 
+function asArrayBuffer(data) {
+  if (data instanceof ArrayBuffer) {
+    return data;
+  }
+  if (data && data.buffer instanceof ArrayBuffer) {
+    const start = data.byteOffset || 0;
+    const end = start + (data.byteLength || data.length || 0);
+    return data.buffer.slice(start, end);
+  }
+  throw new Error("PSD 파일을 바이너리로 읽지 못했습니다.");
+}
+
+function readAscii(view, offset, length) {
+  let value = "";
+  for (let index = 0; index < length; index += 1) {
+    value += String.fromCharCode(view.getUint8(offset + index));
+  }
+  return value;
+}
+
+function skipPaddedPascalString(view, offset, endOffset) {
+  if (offset >= endOffset) {
+    return endOffset;
+  }
+  const length = view.getUint8(offset);
+  let nextOffset = offset + 1 + length;
+  if ((1 + length) % 2 !== 0) {
+    nextOffset += 1;
+  }
+  return Math.min(nextOffset, endOffset);
+}
+
+function parsePsdResolution(view) {
+  try {
+    let offset = 26;
+    if (offset + 4 > view.byteLength) {
+      return null;
+    }
+    const colorModeLength = view.getUint32(offset, false);
+    offset += 4 + colorModeLength;
+    if (offset + 4 > view.byteLength) {
+      return null;
+    }
+    const imageResourcesLength = view.getUint32(offset, false);
+    offset += 4;
+    const endOffset = Math.min(view.byteLength, offset + imageResourcesLength);
+
+    while (offset + 12 <= endOffset) {
+      const signature = readAscii(view, offset, 4);
+      offset += 4;
+      if (signature !== "8BIM" && signature !== "8B64") {
+        return null;
+      }
+      const resourceId = view.getUint16(offset, false);
+      offset += 2;
+      offset = skipPaddedPascalString(view, offset, endOffset);
+      if (offset + 4 > endOffset) {
+        return null;
+      }
+      const size = view.getUint32(offset, false);
+      offset += 4;
+      const dataOffset = offset;
+      const nextOffset = offset + size + (size % 2);
+      if (resourceId === 1005 && size >= 16 && dataOffset + 4 <= endOffset) {
+        const resolution = view.getInt32(dataOffset, false) / 65536;
+        return Number.isFinite(resolution) && resolution > 0 ? resolution : null;
+      }
+      offset = nextOffset;
+    }
+  } catch (error) {
+    return null;
+  }
+  return null;
+}
+
+function parsePsdHeader(data, name) {
+  const buffer = asArrayBuffer(data);
+  if (buffer.byteLength < 26) {
+    throw new Error(`${name} PSD 헤더가 너무 짧습니다.`);
+  }
+  const view = new DataView(buffer);
+  const signature = readAscii(view, 0, 4);
+  if (signature !== "8BPS") {
+    throw new Error(`${name} 파일 형식이 PSD/PSB가 아닙니다.`);
+  }
+  const version = view.getUint16(4, false);
+  if (version !== 1 && version !== 2) {
+    throw new Error(`${name} PSD 버전을 읽을 수 없습니다.`);
+  }
+  return {
+    width: roundPixel(view.getUint32(18, false)),
+    height: roundPixel(view.getUint32(14, false)),
+    resolution: parsePsdResolution(view) || 72
+  };
+}
+
+async function readPsdMetric(item) {
+  const data = await item.entry.read({ format: binaryReadFormat });
+  const header = parsePsdHeader(data, item.name);
+  return {
+    id: item.id,
+    item,
+    width: header.width,
+    height: header.height,
+    resolution: header.resolution
+  };
+}
+
 function getTopLevelLayers(doc) {
   return Array.from(doc.layers || []);
 }
@@ -205,7 +314,147 @@ function segmentGroupName(item, index) {
   return `${number} ${stripExtension(item.name)}`;
 }
 
-async function stitchPsdFiles(items, options, onProgress) {
+function smartObjectLayerName(item) {
+  return stripExtension(item.name);
+}
+
+function assertBatchPlayResult(result, message) {
+  const errorResult = Array.isArray(result) ? result.find(item => item && item._obj === "error") : null;
+  if (errorResult) {
+    throw new Error(`${message}: ${errorResult.message || errorResult.result || "Photoshop 명령 실패"}`);
+  }
+}
+
+function createRenameActiveLayerCommand(name) {
+  return {
+    _obj: "set",
+    _target: [
+      {
+        _ref: "layer",
+        _enum: "ordinal",
+        _value: "targetEnum"
+      }
+    ],
+    to: {
+      _obj: "layer",
+      name
+    }
+  };
+}
+
+function createConvertSmartObjectToLayersCommand() {
+  return {
+    _obj: "placedLayerConvertToLayers",
+    _options: {
+      dialogOptions: "dontDisplay"
+    }
+  };
+}
+
+function createPlaceEmbeddedSmartObjectCommand(metric, canvas) {
+  const token = fs.createSessionToken(metric.item.entry);
+  const x = Math.round((canvas.width - metric.width) / 2);
+  const y = metric.offsetY;
+  const horizontalOffset = Math.round(x + metric.width / 2 - canvas.width / 2);
+  const verticalOffset = Math.round(y + metric.height / 2 - canvas.height / 2);
+
+  return {
+    _obj: "placeEvent",
+    "null": {
+      _path: token,
+      _kind: "local"
+    },
+    freeTransformCenterState: {
+      _enum: "quadCenterState",
+      _value: "QCSAverage"
+    },
+    offset: {
+      _obj: "offset",
+      horizontal: {
+        _unit: "pixelsUnit",
+        _value: horizontalOffset
+      },
+      vertical: {
+        _unit: "pixelsUnit",
+        _value: verticalOffset
+      }
+    },
+    _isCommand: false,
+    _options: {
+      dialogOptions: "dontDisplay"
+    }
+  };
+}
+
+async function stitchPsdFilesAsSmartObjects(items, options, onProgress) {
+  if (items.length === 0) {
+    throw new Error("PSD 파일을 먼저 선택하세요.");
+  }
+
+  const gap = Math.max(0, Number(options.gap) || 0);
+  onProgress(`${items.length}개 PSD 크기 분석 중`);
+  const metrics = await Promise.all(items.map(item => readPsdMetric(item)));
+
+  const maxWidth = Math.max(...metrics.map(metric => metric.width));
+  const totalHeight = metrics.reduce((sum, metric) => sum + metric.height, 0) + Math.max(0, metrics.length - 1) * gap;
+  const canvas = {
+    width: maxWidth,
+    height: Math.max(1, totalHeight)
+  };
+
+  let offsetY = 0;
+  for (const metric of metrics) {
+    metric.offsetY = offsetY;
+    offsetY += metric.height + gap;
+  }
+
+  let finalDoc = null;
+  await core.executeAsModal(async executionContext => {
+    finalDoc = await app.createDocument({
+      width: canvas.width,
+      height: canvas.height,
+      resolution: metrics[0] ? metrics[0].resolution : 72,
+      name: options.outputName || "PSD Stitch",
+      fill: "transparent"
+    });
+    app.activeDocument = finalDoc;
+
+    const commands = [];
+    for (let index = 0; index < metrics.length; index += 1) {
+      const metric = metrics[index];
+      commands.push(createPlaceEmbeddedSmartObjectCommand(metric, canvas));
+      commands.push(createRenameActiveLayerCommand(smartObjectLayerName(metric.item)));
+      if (options.convertSmartObjects) {
+        commands.push(createConvertSmartObjectToLayersCommand());
+      }
+    }
+
+    const label = `${metrics.length}개 스마트 오브젝트 일괄 배치 중`;
+    onProgress(label);
+    executionContext.reportProgress({
+      value: 0.5,
+      commandName: label
+    });
+    const result = await action.batchPlay(commands, { synchronousExecution: false });
+    assertBatchPlayResult(result, "스마트 오브젝트 일괄 배치 실패");
+
+    if (finalDoc) {
+      app.activeDocument = finalDoc;
+    }
+  }, {
+    commandName: "Stitch PSD files as Smart Objects",
+    interactive: false
+  });
+
+  return metrics.map(metric => ({
+    id: metric.id,
+    width: metric.width,
+    height: metric.height,
+    resolution: metric.resolution
+  }));
+}
+
+async function stitchPsdFilesAsLayers(items, options, onProgress) {
   if (items.length === 0) {
     throw new Error("PSD 파일을 먼저 선택하세요.");
   }
@@ -332,6 +581,7 @@ function App() {
   const [draggingId, setDraggingId] = useState(null);
   const [gap, setGap] = useState(0);
   const [closeSources, setCloseSources] = useState(true);
+  const [convertSmartObjects, setConvertSmartObjects] = useState(true);
   const [activeTab, setActiveTab] = useState("files");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("PSD 조각을 선택하세요.");
@@ -396,10 +646,37 @@ function App() {
       return;
     }
     setBusy(true);
-    setStatus("Photoshop에서 PSD를 여는 중입니다.");
+    setStatus("PSD를 스마트 오브젝트로 배치하는 중입니다.");
     setLastMetrics([]);
     try {
-      const metrics = await stitchPsdFiles(
+      const metrics = await stitchPsdFilesAsSmartObjects(
+        items,
+        {
+          gap: Number(gap) || 0,
+          outputName: "PSD Stitch",
+          convertSmartObjects
+        },
+        message => setStatus(message)
+      );
+      setLastMetrics(metrics);
+      setStatus(`완료: ${items.length}개 PSD를 스마트 오브젝트로 합쳤습니다.`);
+    } catch (error) {
+      console.error(error);
+      setStatus(error && error.message ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runLayerStitch() {
+    if (busy || items.length === 0) {
+      return;
+    }
+    setBusy(true);
+    setStatus("Photoshop에서 PSD를 열어 레이어를 복사하는 중입니다.");
+    setLastMetrics([]);
+    try {
+      const metrics = await stitchPsdFilesAsLayers(
         items,
         {
           gap: Number(gap) || 0,
@@ -409,7 +686,7 @@ function App() {
         message => setStatus(message)
       );
       setLastMetrics(metrics);
-      setStatus(`완료: ${items.length}개 PSD를 세로로 합쳤습니다.`);
+      setStatus(`완료: ${items.length}개 PSD 레이어를 세로로 합쳤습니다.`);
     } catch (error) {
       console.error(error);
       setStatus(error && error.message ? error.message : String(error));
@@ -617,8 +894,8 @@ function App() {
             <input type="number" min="0" step="1" value={gap} onChange={updateGap} disabled={busy} />
           </label>
           <label className="check-row">
-            <input type="checkbox" checked={closeSources} onChange={event => setCloseSources(event.target.checked)} disabled={busy} />
-            원본 PSD 탭 닫기
+            <input type="checkbox" checked={convertSmartObjects} onChange={event => setConvertSmartObjects(event.target.checked)} disabled={busy} />
+            스마트 오브젝트를 레이어로 변환
           </label>
         </section>
       )}

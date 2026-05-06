@@ -141,7 +141,7 @@ input[type="checkbox"] {
   align-items: center;
   gap: 8px;
   color: #b8b8b8;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 500;
   line-height: 1;
   text-transform: uppercase;
@@ -154,7 +154,7 @@ input[type="checkbox"] {
   height: auto;
   color: #8f8f8f;
   background: transparent;
-  font-size: 11px;
+  font-size: 10px;
 }
 
 .section-title::after {
