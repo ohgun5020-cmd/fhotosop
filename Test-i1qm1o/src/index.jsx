@@ -10,6 +10,11 @@ const { storage } = require("uxp");
 
 const fs = storage.localFileSystem;
 const binaryReadFormat = storage.formats && storage.formats.binary ? storage.formats.binary : "binary";
+const SORT_OPTIONS = [
+  { mode: "name-asc", label: "이름순 정렬", shortLabel: "이름순" },
+  { mode: "name-desc", label: "이름 역순 정렬", shortLabel: "역순" },
+  { mode: "created-asc", label: "파일생성시간 정렬", shortLabel: "생성시간" }
+];
 
 function stripExtension(name) {
   return String(name || "").replace(/\.[^.]+$/, "");
@@ -20,12 +25,57 @@ function fileExtension(name) {
   return match ? match[1].toLowerCase() : "";
 }
 
-function formatFileDate(entry) {
-  const rawDate = entry && (entry.dateModified || entry.lastModified || entry.modified);
+function getEntryKey(entry) {
+  if (!entry) {
+    return "";
+  }
+  return String(entry.nativePath || entry.fullName || entry.fsName || entry.name || "");
+}
+
+function getDateTime(source, keys) {
+  if (!source) {
+    return 0;
+  }
+  for (const key of keys) {
+    const value = source[key];
+    if (!value) {
+      continue;
+    }
+    const date = value instanceof Date ? value : new Date(value);
+    if (!Number.isNaN(date.getTime())) {
+      return date.getTime();
+    }
+  }
+  return 0;
+}
+
+async function readEntryMetadata(entry) {
+  if (!entry || typeof entry.getMetadata !== "function") {
+    return null;
+  }
+  try {
+    return await entry.getMetadata();
+  } catch (error) {
+    return null;
+  }
+}
+
+function getModifiedTime(entry, metadata) {
+  const keys = ["dateModified", "lastModified", "modified", "modificationDate"];
+  return getDateTime(metadata, keys) || getDateTime(entry, keys);
+}
+
+function getCreatedTime(entry, metadata) {
+  const keys = ["dateCreated", "created", "creationDate", "birthtime", "dateAdded"];
+  return getDateTime(metadata, keys) || getDateTime(entry, keys) || getModifiedTime(entry, metadata);
+}
+
+function formatFileDate(entry, metadata) {
+  const rawDate = getModifiedTime(entry, metadata);
   if (!rawDate) {
     return "PSD";
   }
-  const date = rawDate instanceof Date ? rawDate : new Date(rawDate);
+  const date = new Date(rawDate);
   if (Number.isNaN(date.getTime())) {
     return "PSD";
   }
@@ -76,37 +126,57 @@ function extractSortToken(name) {
   };
 }
 
-function createFileItem(entry, index) {
+async function createFileItem(entry, index) {
+  const metadata = await readEntryMetadata(entry);
   const sortToken = extractSortToken(entry.name);
   return {
     id: `${Date.now()}-${index}-${entry.name}`,
     entry,
+    fileKey: getEntryKey(entry),
     name: entry.name,
     extension: fileExtension(entry.name),
     sortToken,
     width: null,
     height: null,
     resolution: null,
-    modifiedLabel: formatFileDate(entry)
+    createdTime: getCreatedTime(entry, metadata),
+    modifiedTime: getModifiedTime(entry, metadata),
+    modifiedLabel: formatFileDate(entry, metadata)
   };
 }
 
-function sortItems(items) {
-  return items.slice().sort((a, b) => {
-    const typeRank = { number: 0, letter: 1, name: 2 };
-    const rankA = typeRank[a.sortToken.type] ?? 3;
-    const rankB = typeRank[b.sortToken.type] ?? 3;
-    if (rankA !== rankB) {
-      return rankA - rankB;
-    }
-    if (a.sortToken.value < b.sortToken.value) {
-      return -1;
-    }
-    if (a.sortToken.value > b.sortToken.value) {
-      return 1;
-    }
-    return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
-  });
+function compareItemsByName(a, b) {
+  const typeRank = { number: 0, letter: 1, name: 2 };
+  const rankA = typeRank[a.sortToken.type] ?? 3;
+  const rankB = typeRank[b.sortToken.type] ?? 3;
+  if (rankA !== rankB) {
+    return rankA - rankB;
+  }
+  if (a.sortToken.value < b.sortToken.value) {
+    return -1;
+  }
+  if (a.sortToken.value > b.sortToken.value) {
+    return 1;
+  }
+  return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function compareItemsByCreatedTime(a, b) {
+  const timeA = a.createdTime || a.modifiedTime || 0;
+  const timeB = b.createdTime || b.modifiedTime || 0;
+  if (timeA !== timeB) {
+    return timeA - timeB;
+  }
+  return compareItemsByName(a, b);
+}
+
+function sortItems(items, mode = "name-asc") {
+  const sorted = items.slice().sort(mode === "created-asc" ? compareItemsByCreatedTime : compareItemsByName);
+  return mode === "name-desc" ? sorted.reverse() : sorted;
+}
+
+function getSortOption(mode) {
+  return SORT_OPTIONS.find(option => option.mode === mode) || SORT_OPTIONS[0];
 }
 
 function moveItem(items, fromIndex, toIndex) {
@@ -635,6 +705,8 @@ function App() {
   const [status, setStatus] = useState("PSD 조각을 선택하세요.");
   const [lastResultSize, setLastResultSize] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
+  const [sortMenu, setSortMenu] = useState(null);
+  const [sortMode, setSortMode] = useState("name-asc");
   const [selectedIds, setSelectedIds] = useState([]);
   const [selectionAnchorId, setSelectionAnchorId] = useState(null);
   const [marquee, setMarquee] = useState(null);
@@ -649,6 +721,7 @@ function App() {
     function handleKeyDown(event) {
       if (event.key === "Escape") {
         closeContextMenu();
+        closeSortMenu();
         setSelectedIds([]);
         setSelectionAnchorId(null);
         setMarquee(null);
@@ -730,14 +803,25 @@ function App() {
       return;
     }
     const selectedFiles = Array.isArray(files) ? files : [files];
-    const nextItems = sortItems(selectedFiles.filter(Boolean).map(createFileItem));
+    const fileItems = await Promise.all(selectedFiles.filter(Boolean).map(createFileItem));
+    const existingKeys = new Set(items.map(item => item.fileKey || getEntryKey(item.entry) || item.name));
+    const uniqueItems = fileItems.filter(item => {
+      const key = item.fileKey || item.name;
+      if (existingKeys.has(key)) {
+        return false;
+      }
+      existingKeys.add(key);
+      return true;
+    });
+    const nextItems = items.length === 0 ? sortItems(uniqueItems, sortMode) : items.concat(uniqueItems);
     setItems(nextItems);
-    setSelectedIds([]);
-    setSelectionAnchorId(null);
+    setSelectedIds(uniqueItems.map(item => item.id));
+    setSelectionAnchorId(uniqueItems.length > 0 ? uniqueItems[0].id : null);
     setMarquee(null);
     closeContextMenu();
+    closeSortMenu();
     setLastResultSize(null);
-    setStatus(`${nextItems.length}개 PSD를 불러왔습니다. 순서를 확인하세요.`);
+    setStatus(`${uniqueItems.length}개 PSD를 추가했습니다. 전체 ${nextItems.length}개입니다.`);
   }
 
   async function runStitch() {
@@ -840,6 +924,7 @@ function App() {
   function handleModifiedRowSelection(event, item) {
     event.preventDefault();
     closeContextMenu();
+    closeSortMenu();
     setDraggingId(null);
     setMarquee(null);
 
@@ -916,6 +1001,39 @@ function App() {
     setContextMenu(null);
   }
 
+  function closeSortMenu() {
+    setSortMenu(null);
+  }
+
+  function closeMenus() {
+    closeContextMenu();
+    closeSortMenu();
+  }
+
+  function openSortMenu(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (busy || items.length < 2) {
+      return;
+    }
+    closeContextMenu();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const menuWidth = 126;
+    const menuHeight = 68;
+    const viewportWidth = typeof window !== "undefined" && window.innerWidth ? window.innerWidth : rect.right + menuWidth;
+    const viewportHeight = typeof window !== "undefined" && window.innerHeight ? window.innerHeight : rect.bottom + menuHeight;
+    setSortMenu({
+      x: Math.max(4, Math.min(rect.right - menuWidth, viewportWidth - menuWidth - 4)),
+      y: Math.max(4, Math.min(rect.bottom + 3, viewportHeight - menuHeight - 4))
+    });
+  }
+
+  function applySortMode(mode) {
+    setSortMode(mode);
+    setItems(current => sortItems(current, mode));
+    closeSortMenu();
+  }
+
   function getMarqueeRect(selection) {
     const left = Math.min(selection.startX, selection.currentX);
     const top = Math.min(selection.startY, selection.currentY);
@@ -959,6 +1077,7 @@ function App() {
     }
     event.preventDefault();
     closeContextMenu();
+    closeSortMenu();
     setDraggingId(null);
     setSelectedIds([]);
     setSelectionAnchorId(null);
@@ -978,6 +1097,7 @@ function App() {
     if (busy) {
       return;
     }
+    closeSortMenu();
     const targetIds = selectedIds.indexOf(item.id) !== -1 && selectedIds.length > 0 ? selectedIds.slice() : [item.id];
     const menuWidth = 126;
     const menuHeight = 68;
@@ -1003,6 +1123,7 @@ function App() {
     }
     event.preventDefault();
     closeContextMenu();
+    closeSortMenu();
     setSelectedIds([item.id]);
     setSelectionAnchorId(item.id);
     setDraggingId(item.id);
@@ -1027,8 +1148,10 @@ function App() {
     return Boolean(target && target.closest && target.closest(".row-actions"));
   }
 
+  const currentSortOption = getSortOption(sortMode);
+
   return (
-    <div className="app-shell" onClick={closeContextMenu}>
+    <div className="app-shell" onClick={closeMenus}>
       <nav className="tabs" aria-label="PSD Stitcher sections">
         <ControlButton
           className={`tab-button ${activeTab === "files" ? "active" : ""}`}
@@ -1054,11 +1177,14 @@ function App() {
 
           <div className="list-header">
             <div className="section-title">선택된 파일 리스트 <span>{items.length}</span></div>
-            <ControlButton className="list-sort" onClick={() => setItems(sortItems(items))} disabled={busy || items.length < 2}>
-              이름순 정렬
+            <ControlButton className="sort-select" onClick={openSortMenu} disabled={busy || items.length < 2} ariaLabel="정렬 메뉴">
+              <span className="sort-select-label">{items.length < 2 ? "-" : currentSortOption.shortLabel}</span>
+              <span className="sort-select-arrow">
+                <ChevronIcon direction="down" />
+              </span>
             </ControlButton>
           </div>
-          <section className="file-list" aria-label="PSD order" onMouseDown={startMarqueeSelection} onScroll={closeContextMenu}>
+          <section className="file-list" aria-label="PSD order" onMouseDown={startMarqueeSelection} onScroll={closeMenus}>
             {items.length === 0 ? (
               <div className="empty">PSD/PSB 파일을 여러 개 선택하면 여기에 순서가 표시됩니다.</div>
             ) : (
@@ -1098,6 +1224,28 @@ function App() {
             )}
           </section>
           {marquee && <div className="marquee-box" style={getMarqueeStyle(marquee)} />}
+          {sortMenu && (
+            <div
+              className="sort-menu"
+              role="menu"
+              style={{ left: sortMenu.x, top: sortMenu.y }}
+              onClick={event => event.stopPropagation()}
+              onContextMenu={event => event.preventDefault()}
+            >
+              {SORT_OPTIONS.map(option => (
+                <div
+                  className={`sort-menu-item ${sortMode === option.mode ? "active" : ""}`}
+                  role="menuitem"
+                  tabIndex={0}
+                  key={option.mode}
+                  onClick={() => applySortMode(option.mode)}
+                  onKeyDown={event => handleContextMenuKey(event, () => applySortMode(option.mode))}
+                >
+                  {option.label}
+                </div>
+              ))}
+            </div>
+          )}
           {contextMenu && (
             <div
               className="context-menu"
