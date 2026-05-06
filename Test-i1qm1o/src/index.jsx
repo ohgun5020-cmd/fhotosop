@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 import "./styles.css";
 
@@ -116,36 +116,6 @@ function moveItem(items, fromIndex, toIndex) {
   const [item] = next.splice(fromIndex, 1);
   next.splice(toIndex, 0, item);
   return next;
-}
-
-function setDragPreview(event, item, index) {
-  const transfer = event && event.dataTransfer;
-  if (!transfer) {
-    return;
-  }
-  try {
-    transfer.effectAllowed = "move";
-    transfer.dropEffect = "move";
-    transfer.setData("text/plain", item.name);
-  } catch (error) {
-  }
-  if (!transfer.setDragImage || !document.body) {
-    return;
-  }
-  const preview = document.createElement("div");
-  preview.className = "drag-preview";
-  preview.textContent = `${String(index + 1).padStart(2, "0")}  ${item.name}`;
-  document.body.appendChild(preview);
-  try {
-    transfer.setDragImage(preview, 12, 12);
-  } catch (error) {
-  }
-  setTimeout(() => {
-    try {
-      preview.remove();
-    } catch (error) {
-    }
-  }, 0);
 }
 
 function roundPixel(value) {
@@ -366,6 +336,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("PSD 조각을 선택하세요.");
   const [lastMetrics, setLastMetrics] = useState([]);
+  const [contextMenu, setContextMenu] = useState(null);
 
   const totalPreviewHeight = useMemo(() => {
     if (lastMetrics.length === 0) {
@@ -373,6 +344,34 @@ function App() {
     }
     return lastMetrics.reduce((sum, metric) => sum + metric.height, 0) + Math.max(0, lastMetrics.length - 1) * Number(gap || 0);
   }, [lastMetrics, gap]);
+
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (event.key === "Escape") {
+        closeContextMenu();
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!draggingId) {
+      return undefined;
+    }
+
+    function handleMouseUp() {
+      finishDrag();
+    }
+
+    document.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [draggingId]);
 
   async function chooseFiles() {
     if (busy) {
@@ -432,21 +431,68 @@ function App() {
     setItems(current => moveItem(current, index, index + 1));
   }
 
-  function handleDragStart(event, item, index) {
+  function removeItem(itemId) {
+    setItems(current => current.filter(item => item.id !== itemId));
+    setLastMetrics([]);
+    closeContextMenu();
+  }
+
+  function moveItemToStart(itemId) {
+    setItems(current => {
+      const fromIndex = current.findIndex(item => item.id === itemId);
+      return moveItem(current, fromIndex, 0);
+    });
+    closeContextMenu();
+  }
+
+  function moveItemToEnd(itemId) {
+    setItems(current => {
+      const fromIndex = current.findIndex(item => item.id === itemId);
+      return moveItem(current, fromIndex, current.length - 1);
+    });
+    closeContextMenu();
+  }
+
+  function handleContextMenuKey(event, action) {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      action();
+    }
+  }
+
+  function closeContextMenu() {
+    setContextMenu(null);
+  }
+
+  function openContextMenu(event, item) {
+    event.preventDefault();
+    event.stopPropagation();
     if (busy) {
       return;
     }
-    setDraggingId(item.id);
-    setDragPreview(event, item, index);
+    const menuWidth = 96;
+    const menuHeight = 68;
+    const viewportWidth = typeof window !== "undefined" && window.innerWidth ? window.innerWidth : event.clientX + menuWidth;
+    const viewportHeight = typeof window !== "undefined" && window.innerHeight ? window.innerHeight : event.clientY + menuHeight;
+    setContextMenu({
+      itemId: item.id,
+      x: Math.max(4, Math.min(event.clientX, viewportWidth - menuWidth - 4)),
+      y: Math.max(4, Math.min(event.clientY, viewportHeight - menuHeight - 4))
+    });
   }
 
-  function handleDragOver(event, targetId) {
-    event.preventDefault();
-    if (!draggingId || draggingId === targetId) {
+  function handleRowMouseDown(event, item) {
+    if (busy || event.button !== 0 || isRowControlTarget(event.target)) {
       return;
     }
-    if (event.dataTransfer) {
-      event.dataTransfer.dropEffect = "move";
+    event.preventDefault();
+    closeContextMenu();
+    setDraggingId(item.id);
+  }
+
+  function handleRowMouseEnter(targetId) {
+    if (!draggingId || draggingId === targetId) {
+      return;
     }
     setItems(current => {
       const fromIndex = current.findIndex(item => item.id === draggingId);
@@ -459,8 +505,12 @@ function App() {
     setDraggingId(null);
   }
 
+  function isRowControlTarget(target) {
+    return Boolean(target && target.closest && target.closest(".row-actions"));
+  }
+
   return (
-    <div className="app-shell">
+    <div className="app-shell" onClick={closeContextMenu}>
       <nav className="tabs" aria-label="PSD Stitcher sections">
         <ControlButton
           className={`tab-button ${activeTab === "files" ? "active" : ""}`}
@@ -490,7 +540,7 @@ function App() {
               이름순 정렬
             </ControlButton>
           </div>
-          <section className="file-list" aria-label="PSD order">
+          <section className="file-list" aria-label="PSD order" onScroll={closeContextMenu}>
             {items.length === 0 ? (
               <div className="empty">PSD/PSB 파일을 여러 개 선택하면 여기에 순서가 표시됩니다.</div>
             ) : (
@@ -505,12 +555,9 @@ function App() {
                     <div
                       className={`file-row ${item.id === draggingId ? "dragging" : ""}`}
                       key={item.id}
-                      draggable={!busy}
-                      onDragStart={event => handleDragStart(event, item, index)}
-                      onDragEnter={event => handleDragOver(event, item.id)}
-                      onDragOver={event => handleDragOver(event, item.id)}
-                      onDrop={finishDrag}
-                      onDragEnd={finishDrag}
+                      onMouseDown={event => handleRowMouseDown(event, item)}
+                      onMouseEnter={() => handleRowMouseEnter(item.id)}
+                      onContextMenu={event => openContextMenu(event, item)}
                     >
                       <div className="index">{String(index + 1).padStart(2, "0")}</div>
                       <div className="file-main">
@@ -530,6 +577,25 @@ function App() {
               </div>
             )}
           </section>
+          {contextMenu && (
+            <div
+              className="context-menu"
+              role="menu"
+              style={{ left: contextMenu.x, top: contextMenu.y }}
+              onClick={event => event.stopPropagation()}
+              onContextMenu={event => event.preventDefault()}
+            >
+              <div className="context-menu-item" role="menuitem" tabIndex={0} onClick={() => removeItem(contextMenu.itemId)} onKeyDown={event => handleContextMenuKey(event, () => removeItem(contextMenu.itemId))}>
+                목록에서 제거
+              </div>
+              <div className="context-menu-item" role="menuitem" tabIndex={0} onClick={() => moveItemToStart(contextMenu.itemId)} onKeyDown={event => handleContextMenuKey(event, () => moveItemToStart(contextMenu.itemId))}>
+                맨 위로
+              </div>
+              <div className="context-menu-item" role="menuitem" tabIndex={0} onClick={() => moveItemToEnd(contextMenu.itemId)} onKeyDown={event => handleContextMenuKey(event, () => moveItemToEnd(contextMenu.itemId))}>
+                맨 아래로
+              </div>
+            </div>
+          )}
 
           <section className="bottom-panel">
             <section className="status">
