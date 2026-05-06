@@ -726,19 +726,13 @@ function App() {
         setSelectionAnchorId(null);
         setMarquee(null);
       }
-
-      if (event.key === "Delete" && activeTab === "files" && !busy && selectedIds.length > 0) {
-        event.preventDefault();
-        removeItemsByIds(selectedIds);
-        closeContextMenu();
-      }
     }
 
     document.addEventListener("keydown", handleKeyDown);
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [activeTab, busy, selectedIds]);
+  }, []);
 
   useEffect(() => {
     if (!marqueeActive) {
@@ -891,10 +885,15 @@ function App() {
   }
 
   function removeItemsByIds(itemIds) {
-    const idSet = new Set(itemIds);
+    const idSet = new Set(itemIds.filter(Boolean));
+    if (idSet.size === 0) {
+      return;
+    }
     setItems(current => current.filter(item => !idSet.has(item.id)));
     setSelectedIds(current => current.filter(itemId => !idSet.has(itemId)));
     setSelectionAnchorId(current => (current && idSet.has(current) ? null : current));
+    setDraggingId(current => (current && idSet.has(current) ? null : current));
+    setMarquee(null);
     setLastResultSize(null);
   }
 
