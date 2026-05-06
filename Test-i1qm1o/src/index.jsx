@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import "./styles.css";
 
@@ -117,6 +117,25 @@ function moveItem(items, fromIndex, toIndex) {
   const [item] = next.splice(fromIndex, 1);
   next.splice(toIndex, 0, item);
   return next;
+}
+
+function normalizeRect(startX, startY, currentX, currentY) {
+  const left = Math.min(startX, currentX);
+  const top = Math.min(startY, currentY);
+  const right = Math.max(startX, currentX);
+  const bottom = Math.max(startY, currentY);
+  return {
+    left,
+    top,
+    right,
+    bottom,
+    width: right - left,
+    height: bottom - top
+  };
+}
+
+function rectsIntersect(first, second) {
+  return first.left <= second.right && first.right >= second.left && first.top <= second.bottom && first.bottom >= second.top;
 }
 
 function roundPixel(value) {
@@ -353,8 +372,8 @@ function createConvertSmartObjectToLayersCommand() {
 
 function createPlaceEmbeddedSmartObjectCommand(metric, canvas) {
   const token = fs.createSessionToken(metric.item.entry);
-  const x = Math.round((canvas.width - metric.width) / 2);
-  const y = metric.offsetY;
+  const x = Math.round(Number(metric.offsetX) || 0);
+  const y = Math.round(Number(metric.offsetY) || 0);
   const horizontalOffset = Math.round(x + metric.width / 2 - canvas.width / 2);
   const verticalOffset = Math.round(y + metric.height / 2 - canvas.height / 2);
 
@@ -386,27 +405,52 @@ function createPlaceEmbeddedSmartObjectCommand(metric, canvas) {
   };
 }
 
+function getStitchMode(value) {
+  return value === "horizontal" ? "horizontal" : "vertical";
+}
+
+function calculateStitchCanvas(metrics, gap, stitchMode) {
+  const mode = getStitchMode(stitchMode);
+  if (mode === "horizontal") {
+    return {
+      width: Math.max(1, metrics.reduce((sum, metric) => sum + metric.width, 0) + Math.max(0, metrics.length - 1) * gap),
+      height: Math.max(...metrics.map(metric => metric.height))
+    };
+  }
+  return {
+    width: Math.max(...metrics.map(metric => metric.width)),
+    height: Math.max(1, metrics.reduce((sum, metric) => sum + metric.height, 0) + Math.max(0, metrics.length - 1) * gap)
+  };
+}
+
+function applyStitchOffsets(metrics, canvas, gap, stitchMode) {
+  const mode = getStitchMode(stitchMode);
+  let offset = 0;
+  for (const metric of metrics) {
+    if (mode === "horizontal") {
+      metric.offsetX = offset;
+      metric.offsetY = Math.round((canvas.height - metric.height) / 2);
+      offset += metric.width + gap;
+    } else {
+      metric.offsetX = Math.round((canvas.width - metric.width) / 2);
+      metric.offsetY = offset;
+      offset += metric.height + gap;
+    }
+  }
+}
+
 async function stitchPsdFilesAsSmartObjects(items, options, onProgress) {
   if (items.length === 0) {
     throw new Error("PSD 파일을 먼저 선택하세요.");
   }
 
-  const gap = Math.max(0, Number(options.gap) || 0);
+  const gap = Math.round(Number(options.gap) || 0);
+  const stitchMode = getStitchMode(options.stitchMode);
   onProgress(`${items.length}개 PSD 크기 분석 중`);
   const metrics = await Promise.all(items.map(item => readPsdMetric(item)));
 
-  const maxWidth = Math.max(...metrics.map(metric => metric.width));
-  const totalHeight = metrics.reduce((sum, metric) => sum + metric.height, 0) + Math.max(0, metrics.length - 1) * gap;
-  const canvas = {
-    width: maxWidth,
-    height: Math.max(1, totalHeight)
-  };
-
-  let offsetY = 0;
-  for (const metric of metrics) {
-    metric.offsetY = offsetY;
-    offsetY += metric.height + gap;
-  }
+  const canvas = calculateStitchCanvas(metrics, gap, stitchMode);
+  applyStitchOffsets(metrics, canvas, gap, stitchMode);
 
   let finalDoc = null;
   await core.executeAsModal(async executionContext => {
@@ -446,12 +490,15 @@ async function stitchPsdFilesAsSmartObjects(items, options, onProgress) {
     interactive: false
   });
 
-  return metrics.map(metric => ({
-    id: metric.id,
-    width: metric.width,
-    height: metric.height,
-    resolution: metric.resolution
-  }));
+  return {
+    canvas,
+    metrics: metrics.map(metric => ({
+      id: metric.id,
+      width: metric.width,
+      height: metric.height,
+      resolution: metric.resolution
+    }))
+  };
 }
 
 async function stitchPsdFilesAsLayers(items, options, onProgress) {
@@ -582,22 +629,34 @@ function App() {
   const [gap, setGap] = useState(0);
   const [closeSources, setCloseSources] = useState(true);
   const [convertSmartObjects, setConvertSmartObjects] = useState(true);
+  const [stitchMode, setStitchMode] = useState("vertical");
   const [activeTab, setActiveTab] = useState("files");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("PSD 조각을 선택하세요.");
-  const [lastMetrics, setLastMetrics] = useState([]);
+  const [lastResultSize, setLastResultSize] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]);
+  const [selectionAnchorId, setSelectionAnchorId] = useState(null);
+  const [marquee, setMarquee] = useState(null);
+  const marqueeRef = useRef(null);
+  const marqueeActive = Boolean(marquee);
 
-  const totalPreviewHeight = useMemo(() => {
-    if (lastMetrics.length === 0) {
-      return null;
-    }
-    return lastMetrics.reduce((sum, metric) => sum + metric.height, 0) + Math.max(0, lastMetrics.length - 1) * Number(gap || 0);
-  }, [lastMetrics, gap]);
+  useEffect(() => {
+    marqueeRef.current = marquee;
+  }, [marquee]);
 
   useEffect(() => {
     function handleKeyDown(event) {
       if (event.key === "Escape") {
+        closeContextMenu();
+        setSelectedIds([]);
+        setSelectionAnchorId(null);
+        setMarquee(null);
+      }
+
+      if (event.key === "Delete" && activeTab === "files" && !busy && selectedIds.length > 0) {
+        event.preventDefault();
+        removeItemsByIds(selectedIds);
         closeContextMenu();
       }
     }
@@ -606,7 +665,43 @@ function App() {
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, []);
+  }, [activeTab, busy, selectedIds]);
+
+  useEffect(() => {
+    if (!marqueeActive) {
+      return undefined;
+    }
+
+    function handleMouseMove(event) {
+      const current = marqueeRef.current;
+      if (!current) {
+        return;
+      }
+      event.preventDefault();
+      const next = {
+        ...current,
+        currentX: event.clientX,
+        currentY: event.clientY
+      };
+      marqueeRef.current = next;
+      setMarquee(next);
+      const nextSelectedIds = getItemIdsInMarquee(next);
+      setSelectedIds(nextSelectedIds);
+      setSelectionAnchorId(nextSelectedIds.length > 0 ? nextSelectedIds[0] : null);
+    }
+
+    function handleMouseUp() {
+      marqueeRef.current = null;
+      setMarquee(null);
+    }
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [marqueeActive]);
 
   useEffect(() => {
     if (!draggingId) {
@@ -637,7 +732,11 @@ function App() {
     const selectedFiles = Array.isArray(files) ? files : [files];
     const nextItems = sortItems(selectedFiles.filter(Boolean).map(createFileItem));
     setItems(nextItems);
-    setLastMetrics([]);
+    setSelectedIds([]);
+    setSelectionAnchorId(null);
+    setMarquee(null);
+    closeContextMenu();
+    setLastResultSize(null);
     setStatus(`${nextItems.length}개 PSD를 불러왔습니다. 순서를 확인하세요.`);
   }
 
@@ -647,19 +746,20 @@ function App() {
     }
     setBusy(true);
     setStatus("PSD를 스마트 오브젝트로 배치하는 중입니다.");
-    setLastMetrics([]);
+    setLastResultSize(null);
     try {
-      const metrics = await stitchPsdFilesAsSmartObjects(
+      const result = await stitchPsdFilesAsSmartObjects(
         items,
         {
           gap: Number(gap) || 0,
           outputName: "PSD Stitch",
-          convertSmartObjects
+          convertSmartObjects,
+          stitchMode
         },
         message => setStatus(message)
       );
-      setLastMetrics(metrics);
-      setStatus(`완료: ${items.length}개 PSD를 스마트 오브젝트로 합쳤습니다.`);
+      setLastResultSize(result.canvas);
+      setStatus(`완료: ${items.length}개 PSD를 ${stitchMode === "horizontal" ? "가로" : "세로"}로 합쳤습니다.`);
     } catch (error) {
       console.error(error);
       setStatus(error && error.message ? error.message : String(error));
@@ -674,7 +774,7 @@ function App() {
     }
     setBusy(true);
     setStatus("Photoshop에서 PSD를 열어 레이어를 복사하는 중입니다.");
-    setLastMetrics([]);
+    setLastResultSize(null);
     try {
       const metrics = await stitchPsdFilesAsLayers(
         items,
@@ -685,7 +785,6 @@ function App() {
         },
         message => setStatus(message)
       );
-      setLastMetrics(metrics);
       setStatus(`완료: ${items.length}개 PSD 레이어를 세로로 합쳤습니다.`);
     } catch (error) {
       console.error(error);
@@ -695,9 +794,8 @@ function App() {
     }
   }
 
-  function updateGap(event) {
-    const value = Math.max(0, Math.round(Number(event.target.value) || 0));
-    setGap(value);
+  function adjustGap(delta) {
+    setGap(current => Math.round(Number(current) || 0) + delta);
   }
 
   function moveUp(index) {
@@ -708,25 +806,102 @@ function App() {
     setItems(current => moveItem(current, index, index + 1));
   }
 
+  function removeItemsByIds(itemIds) {
+    const idSet = new Set(itemIds);
+    setItems(current => current.filter(item => !idSet.has(item.id)));
+    setSelectedIds(current => current.filter(itemId => !idSet.has(itemId)));
+    setSelectionAnchorId(current => (current && idSet.has(current) ? null : current));
+    setLastResultSize(null);
+  }
+
+  function getRangeItemIds(anchorId, targetId) {
+    const anchorIndex = items.findIndex(item => item.id === anchorId);
+    const targetIndex = items.findIndex(item => item.id === targetId);
+    if (anchorIndex < 0 || targetIndex < 0) {
+      return [targetId];
+    }
+    const startIndex = Math.min(anchorIndex, targetIndex);
+    const endIndex = Math.max(anchorIndex, targetIndex);
+    return items.slice(startIndex, endIndex + 1).map(item => item.id);
+  }
+
+  function mergeSelectedIds(baseIds, addedIds) {
+    const selectedSet = new Set(baseIds.concat(addedIds));
+    return items.filter(item => selectedSet.has(item.id)).map(item => item.id);
+  }
+
+  function toggleSelectedId(itemId) {
+    if (selectedIds.indexOf(itemId) !== -1) {
+      return selectedIds.filter(selectedId => selectedId !== itemId);
+    }
+    return mergeSelectedIds(selectedIds, [itemId]);
+  }
+
+  function handleModifiedRowSelection(event, item) {
+    event.preventDefault();
+    closeContextMenu();
+    setDraggingId(null);
+    setMarquee(null);
+
+    if (event.shiftKey) {
+      const anchorId = selectionAnchorId && items.some(currentItem => currentItem.id === selectionAnchorId)
+        ? selectionAnchorId
+        : (selectedIds.length > 0 ? selectedIds[selectedIds.length - 1] : item.id);
+      const rangeIds = getRangeItemIds(anchorId, item.id);
+      const nextIds = event.ctrlKey || event.metaKey ? mergeSelectedIds(selectedIds, rangeIds) : rangeIds;
+      setSelectedIds(nextIds);
+      setSelectionAnchorId(anchorId);
+      return;
+    }
+
+    if (event.ctrlKey || event.metaKey) {
+      setSelectedIds(toggleSelectedId(item.id));
+      setSelectionAnchorId(item.id);
+    }
+  }
+
+  function getContextTargetIds(itemId) {
+    if (contextMenu && Array.isArray(contextMenu.itemIds) && contextMenu.itemIds.indexOf(itemId) !== -1) {
+      return contextMenu.itemIds;
+    }
+    if (selectedIds.indexOf(itemId) !== -1 && selectedIds.length > 1) {
+      return selectedIds;
+    }
+    return [itemId];
+  }
+
+  function moveItemsToStart(itemIds) {
+    const idSet = new Set(itemIds);
+    setItems(current => {
+      const selected = current.filter(item => idSet.has(item.id));
+      const rest = current.filter(item => !idSet.has(item.id));
+      return selected.concat(rest);
+    });
+    setSelectedIds(itemIds);
+  }
+
+  function moveItemsToEnd(itemIds) {
+    const idSet = new Set(itemIds);
+    setItems(current => {
+      const selected = current.filter(item => idSet.has(item.id));
+      const rest = current.filter(item => !idSet.has(item.id));
+      return rest.concat(selected);
+    });
+    setSelectedIds(itemIds);
+  }
+
   function removeItem(itemId) {
-    setItems(current => current.filter(item => item.id !== itemId));
-    setLastMetrics([]);
+    removeItemsByIds(getContextTargetIds(itemId));
     closeContextMenu();
   }
 
   function moveItemToStart(itemId) {
-    setItems(current => {
-      const fromIndex = current.findIndex(item => item.id === itemId);
-      return moveItem(current, fromIndex, 0);
-    });
+    moveItemsToStart(getContextTargetIds(itemId));
     closeContextMenu();
   }
 
   function moveItemToEnd(itemId) {
-    setItems(current => {
-      const fromIndex = current.findIndex(item => item.id === itemId);
-      return moveItem(current, fromIndex, current.length - 1);
-    });
+    moveItemsToEnd(getContextTargetIds(itemId));
     closeContextMenu();
   }
 
@@ -741,18 +916,78 @@ function App() {
     setContextMenu(null);
   }
 
+  function getMarqueeRect(selection) {
+    const left = Math.min(selection.startX, selection.currentX);
+    const top = Math.min(selection.startY, selection.currentY);
+    const right = Math.max(selection.startX, selection.currentX);
+    const bottom = Math.max(selection.startY, selection.currentY);
+    return {
+      left,
+      top,
+      right,
+      bottom,
+      width: right - left,
+      height: bottom - top
+    };
+  }
+
+  function getMarqueeStyle(selection) {
+    const rect = getMarqueeRect(selection);
+    return {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height
+    };
+  }
+
+  function rectsIntersect(rect, rowRect) {
+    return rect.left <= rowRect.right && rect.right >= rowRect.left && rect.top <= rowRect.bottom && rect.bottom >= rowRect.top;
+  }
+
+  function getItemIdsInMarquee(selection) {
+    const rect = getMarqueeRect(selection);
+    return Array.from(document.querySelectorAll(".file-row[data-item-id]"))
+      .filter(row => rectsIntersect(rect, row.getBoundingClientRect()))
+      .map(row => row.getAttribute("data-item-id"))
+      .filter(Boolean);
+  }
+
+  function startMarqueeSelection(event) {
+    if (busy || event.button !== 0 || items.length === 0 || event.target.closest(".file-row")) {
+      return;
+    }
+    event.preventDefault();
+    closeContextMenu();
+    setDraggingId(null);
+    setSelectedIds([]);
+    setSelectionAnchorId(null);
+    const next = {
+      startX: event.clientX,
+      startY: event.clientY,
+      currentX: event.clientX,
+      currentY: event.clientY
+    };
+    marqueeRef.current = next;
+    setMarquee(next);
+  }
+
   function openContextMenu(event, item) {
     event.preventDefault();
     event.stopPropagation();
     if (busy) {
       return;
     }
-    const menuWidth = 96;
+    const targetIds = selectedIds.indexOf(item.id) !== -1 && selectedIds.length > 0 ? selectedIds.slice() : [item.id];
+    const menuWidth = 126;
     const menuHeight = 68;
     const viewportWidth = typeof window !== "undefined" && window.innerWidth ? window.innerWidth : event.clientX + menuWidth;
     const viewportHeight = typeof window !== "undefined" && window.innerHeight ? window.innerHeight : event.clientY + menuHeight;
+    setSelectedIds(targetIds);
+    setSelectionAnchorId(item.id);
     setContextMenu({
       itemId: item.id,
+      itemIds: targetIds,
       x: Math.max(4, Math.min(event.clientX, viewportWidth - menuWidth - 4)),
       y: Math.max(4, Math.min(event.clientY, viewportHeight - menuHeight - 4))
     });
@@ -762,8 +997,14 @@ function App() {
     if (busy || event.button !== 0 || isRowControlTarget(event.target)) {
       return;
     }
+    if (event.shiftKey || event.ctrlKey || event.metaKey) {
+      handleModifiedRowSelection(event, item);
+      return;
+    }
     event.preventDefault();
     closeContextMenu();
+    setSelectedIds([item.id]);
+    setSelectionAnchorId(item.id);
     setDraggingId(item.id);
   }
 
@@ -793,7 +1034,7 @@ function App() {
           className={`tab-button ${activeTab === "files" ? "active" : ""}`}
           onClick={() => setActiveTab("files")}
         >
-          파일
+          PSD 합치기
         </ControlButton>
         <ControlButton
           className={`tab-button ${activeTab === "settings" ? "active" : ""}`}
@@ -817,7 +1058,7 @@ function App() {
               이름순 정렬
             </ControlButton>
           </div>
-          <section className="file-list" aria-label="PSD order" onScroll={closeContextMenu}>
+          <section className="file-list" aria-label="PSD order" onMouseDown={startMarqueeSelection} onScroll={closeContextMenu}>
             {items.length === 0 ? (
               <div className="empty">PSD/PSB 파일을 여러 개 선택하면 여기에 순서가 표시됩니다.</div>
             ) : (
@@ -828,10 +1069,12 @@ function App() {
                   <div className="row-actions">이동</div>
                 </div>
                 {items.map((item, index) => {
+                  const selected = selectedIds.indexOf(item.id) !== -1;
                   return (
                     <div
-                      className={`file-row ${item.id === draggingId ? "dragging" : ""}`}
+                      className={`file-row ${item.id === draggingId ? "dragging" : ""} ${selected ? "selected" : ""}`}
                       key={item.id}
+                      data-item-id={item.id}
                       onMouseDown={event => handleRowMouseDown(event, item)}
                       onMouseEnter={() => handleRowMouseEnter(item.id)}
                       onContextMenu={event => openContextMenu(event, item)}
@@ -854,6 +1097,7 @@ function App() {
               </div>
             )}
           </section>
+          {marquee && <div className="marquee-box" style={getMarqueeStyle(marquee)} />}
           {contextMenu && (
             <div
               className="context-menu"
@@ -863,13 +1107,13 @@ function App() {
               onContextMenu={event => event.preventDefault()}
             >
               <div className="context-menu-item" role="menuitem" tabIndex={0} onClick={() => removeItem(contextMenu.itemId)} onKeyDown={event => handleContextMenuKey(event, () => removeItem(contextMenu.itemId))}>
-                목록에서 제거
+                {contextMenu.itemIds && contextMenu.itemIds.length > 1 ? "선택 항목 제거" : "목록에서 제거"}
               </div>
               <div className="context-menu-item" role="menuitem" tabIndex={0} onClick={() => moveItemToStart(contextMenu.itemId)} onKeyDown={event => handleContextMenuKey(event, () => moveItemToStart(contextMenu.itemId))}>
-                맨 위로
+                {contextMenu.itemIds && contextMenu.itemIds.length > 1 ? "선택 항목 맨 위로" : "맨 위로"}
               </div>
               <div className="context-menu-item" role="menuitem" tabIndex={0} onClick={() => moveItemToEnd(contextMenu.itemId)} onKeyDown={event => handleContextMenuKey(event, () => moveItemToEnd(contextMenu.itemId))}>
-                맨 아래로
+                {contextMenu.itemIds && contextMenu.itemIds.length > 1 ? "선택 항목 맨 아래로" : "맨 아래로"}
               </div>
             </div>
           )}
@@ -878,7 +1122,7 @@ function App() {
             <section className="status">
               <strong>{busy ? "실행 중" : "상태"}</strong>
               <span>{items.length > 0 ? `${items.length}개 선택됨 · ${status}` : status}</span>
-              {totalPreviewHeight !== null && <em>최근 결과 높이: {totalPreviewHeight}px</em>}
+              {lastResultSize && <em>최근 결과 크기: {lastResultSize.width} x {lastResultSize.height}px</em>}
             </section>
             <ControlButton className="primary merge-button" onClick={runStitch} disabled={busy || items.length === 0}>
               PSD 합치기
@@ -889,13 +1133,32 @@ function App() {
 
       {activeTab === "settings" && (
         <section className="settings">
-          <label>
-            간격(px)
-            <input type="number" min="0" step="1" value={gap} onChange={updateGap} disabled={busy} />
-          </label>
-          <label className="check-row">
+          <div className="setting-row">
+            <div className="setting-label">스티치 방향</div>
+            <div className="segmented-control" role="group" aria-label="스티치 방향">
+              <ControlButton className={`segment-button ${stitchMode === "vertical" ? "active" : ""}`} onClick={() => setStitchMode("vertical")} disabled={busy}>
+                세로
+              </ControlButton>
+              <ControlButton className={`segment-button ${stitchMode === "horizontal" ? "active" : ""}`} onClick={() => setStitchMode("horizontal")} disabled={busy}>
+                가로
+              </ControlButton>
+            </div>
+          </div>
+          <div className="setting-row">
+            <span className="setting-label">간격(px)</span>
+            <div className="gap-stepper" aria-label="간격 픽셀">
+              <ControlButton className="stepper-button" onClick={() => adjustGap(-1)} disabled={busy} ariaLabel="간격 줄이기">
+                -
+              </ControlButton>
+              <div className="gap-value" aria-live="polite">{gap}</div>
+              <ControlButton className="stepper-button" onClick={() => adjustGap(1)} disabled={busy} ariaLabel="간격 늘리기">
+                +
+              </ControlButton>
+            </div>
+          </div>
+          <label className="setting-row check-row">
+            <span className="setting-label">스마트 오브젝트를 레이어로 변환</span>
             <input type="checkbox" checked={convertSmartObjects} onChange={event => setConvertSmartObjects(event.target.checked)} disabled={busy} />
-            스마트 오브젝트를 레이어로 변환
           </label>
         </section>
       )}
@@ -904,7 +1167,7 @@ function App() {
         <section className="status">
           <strong>{busy ? "실행 중" : "상태"}</strong>
           <span>{items.length > 0 ? `${items.length}개 선택됨 · ${status}` : status}</span>
-          {totalPreviewHeight !== null && <em>최근 결과 높이: {totalPreviewHeight}px</em>}
+          {lastResultSize && <em>최근 결과 크기: {lastResultSize.width} x {lastResultSize.height}px</em>}
         </section>
       )}
     </div>

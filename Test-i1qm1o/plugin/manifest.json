@@ -1,6 +1,6 @@
 {
   "id": "com.makeit.psd-stitcher",
-  "name": "PSD Stitcher",
+  "name": "fhotoshop",
   "version": "1.0.0",
   "main": "index.html",
   "manifestVersion": 5,
@@ -17,7 +17,7 @@
       "type": "panel",
       "id": "stitcher",
       "label": {
-        "default": "PSD Stitcher"
+        "default": "fhotoshop"
       },
       "minimumSize": {
         "width": 320,
