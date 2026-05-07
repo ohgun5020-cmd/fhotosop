@@ -330,6 +330,8 @@ input[type="checkbox"] {
   height: 24px;
   align-items: center;
   justify-content: center;
+  border-right: 1px solid #454545;
+  border-left: 1px solid #454545;
   color: #fff;
   font-size: 11px;
   font-weight: 500;
@@ -365,12 +367,6 @@ input[type="checkbox"] {
   color: #9a9a9a;
   background: #232323;
   opacity: 1;
-}
-
-.gap-stepper .stepper-button + .gap-value,
-.gap-stepper .gap-value + .stepper-button {
-  border-left: 1px solid #454545;
-  box-shadow: none;
 }
 
 .check-row {
