@@ -10,6 +10,12 @@
   },
   "requiredPermissions": {
     "localFileSystem": "request",
+    "network": {
+      "domains": [
+        "https://api.openai.com",
+        "https://generativelanguage.googleapis.com"
+      ]
+    },
     "allowCodeGenerationFromStrings": true
   },
   "entrypoints": [
