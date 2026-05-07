@@ -1318,8 +1318,8 @@ function App() {
       {activeTab === "settings" && (
         <section className="settings">
           <div className="setting-row">
-            <div className="setting-label">스티치 방향</div>
-            <div className="segmented-control" role="group" aria-label="스티치 방향">
+            <div className="setting-label">합치기 방향</div>
+            <div className="segmented-control" role="group" aria-label="합치기 방향">
               <ControlButton className={`segment-button ${stitchMode === "vertical" ? "active" : ""}`} onClick={() => setStitchMode("vertical")} disabled={busy}>
                 세로
               </ControlButton>
@@ -1329,13 +1329,13 @@ function App() {
             </div>
           </div>
           <div className="setting-row">
-            <span className="setting-label">간격(px)</span>
-            <div className="gap-stepper" aria-label="간격 픽셀">
-              <ControlButton className="stepper-button" onClick={() => adjustGap(-1)} disabled={busy} ariaLabel="간격 줄이기">
+            <span className="setting-label">콘텐츠 사이 간격(px)</span>
+            <div className="gap-stepper" aria-label="콘텐츠 사이 간격 픽셀">
+              <ControlButton className="stepper-button" onClick={() => adjustGap(-1)} disabled={busy} ariaLabel="콘텐츠 사이 간격 줄이기">
                 -
               </ControlButton>
               <div className="gap-value" aria-live="polite">{gap}</div>
-              <ControlButton className="stepper-button" onClick={() => adjustGap(1)} disabled={busy} ariaLabel="간격 늘리기">
+              <ControlButton className="stepper-button" onClick={() => adjustGap(1)} disabled={busy} ariaLabel="콘텐츠 사이 간격 늘리기">
                 +
               </ControlButton>
             </div>

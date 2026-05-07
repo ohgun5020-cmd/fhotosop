@@ -10,6 +10,8 @@ UXP Developer Tools에는 아래 manifest를 추가해서 사용합니다.
 C:\uxp\psd-stitcher\manifest.json
 ```
 
+Photoshop/UXP가 직접 읽는 실행본은 `C:\uxp\psd-stitcher`입니다. 바탕화면의 작업 폴더를 수정한 뒤에는 반드시 다시 빌드하고 `dist` 결과물을 이 폴더로 복사한 다음 UXP Developer Tools에서 Reload합니다.
+
 테스트용 최소 플러그인은 아래에 있습니다.
 
 ```text
@@ -18,11 +20,13 @@ C:\uxp\uxp-min-test\manifest.json
 
 ## 왜 C:\uxp 로 옮겼나
 
-처음 만든 위치는 아래였습니다.
+현재 작업 원본은 바탕화면의 아래 폴더입니다.
 
 ```text
-C:\Users\메이크잇_03\Desktop\fhotohop\Test-i1qm1o
+C:\Users\메이크잇_03\Desktop\fhotoshop\Test-i1qm1o
 ```
+
+예전 메모에 남아 있던 `fhotohop` 또는 `fhotshop` 경로는 폴더명 변경 전 경로이거나 오타라서 현재 기준으로는 사용하지 않습니다.
 
 그런데 UXP Developer Tools의 workspace 설정 파일에서 한글 사용자 폴더명이 깨져 저장됐습니다.
 
@@ -84,14 +88,14 @@ C:\uxp\psd-stitcher\manifest.json
 ```
 
 4. `Load` 또는 `Load & Watch`를 누릅니다.
-5. Photoshop의 `Plugins` 메뉴에서 `PSD Stitcher` 패널을 엽니다.
+5. Photoshop의 `Plugins` 메뉴에서 `fhotoshop` 패널을 엽니다.
 
 ## 빌드/수정 원본
 
-개발 원본은 기존 폴더에 남아 있습니다.
+개발 원본은 바탕화면의 현재 폴더에 있습니다.
 
 ```text
-C:\Users\메이크잇_03\Desktop\fhotohop\Test-i1qm1o
+C:\Users\메이크잇_03\Desktop\fhotoshop\Test-i1qm1o
 ```
 
 수정 후 빌드는 원본 폴더에서 실행합니다.
@@ -103,21 +107,23 @@ npm run build
 빌드 결과는 원본 폴더의 `dist`에 생성됩니다.
 
 ```text
-C:\Users\메이크잇_03\Desktop\fhotohop\Test-i1qm1o\dist
+C:\Users\메이크잇_03\Desktop\fhotoshop\Test-i1qm1o\dist
 ```
 
 Photoshop에서 로드할 실행본을 갱신하려면 `dist` 내용을 다시 복사합니다.
 
 ```powershell
-Copy-Item -Path "C:\Users\메이크잇_03\Desktop\fhotohop\Test-i1qm1o\dist\*" -Destination "C:\uxp\psd-stitcher" -Recurse -Force
+Copy-Item -Path "C:\Users\메이크잇_03\Desktop\fhotoshop\Test-i1qm1o\dist\*" -Destination "C:\uxp\psd-stitcher" -Recurse -Force
 ```
+
+복사 후에는 UXP Developer Tools에서 해당 플러그인을 Reload합니다.
 
 ## 현재 manifest 핵심
 
 ```json
 {
   "id": "com.makeit.psd-stitcher",
-  "name": "PSD Stitcher",
+  "name": "fhotoshop",
   "manifestVersion": 5,
   "host": {
     "app": "PS",
@@ -132,9 +138,10 @@ Copy-Item -Path "C:\Users\메이크잇_03\Desktop\fhotohop\Test-i1qm1o\dist\*" -
 - 파일명 기준 자동 정렬
 - 마우스 드래그 또는 화살표 버튼으로 순서 조정
 - 파일 행 우클릭 메뉴: 목록에서 제거, 맨 위로, 맨 아래로
-- 간격(px) 지정
+- 합치기 방향 선택: 세로/가로
+- 콘텐츠 사이 간격(px) 지정
 - 원본 PSD 탭 닫기 옵션
-- 선택한 순서대로 새 Photoshop 문서에 세로 병합
+- 선택한 순서와 합치기 방향대로 새 Photoshop 문서에 병합
 
 ## UI 구현 메모
 
