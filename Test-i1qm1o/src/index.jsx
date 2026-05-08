@@ -26,6 +26,13 @@ const AI_MODEL_OPTIONS = [
     detail: "gpt-image-1.5"
   },
   {
+    id: "openai:gpt-image-2",
+    provider: "openai",
+    model: "gpt-image-2",
+    label: "OpenAI 2",
+    detail: "gpt-image-2"
+  },
+  {
     id: "gemini:gemini-3.1-flash-image-preview",
     provider: "gemini",
     model: DEFAULT_GEMINI_IMAGE_MODEL,
@@ -708,6 +715,85 @@ function bytesToBlob(bytes, mimeType) {
 
 async function blobToBytes(blob) {
   return normalizeBytes(await blob.arrayBuffer());
+}
+
+function detectImageMimeType(bytes) {
+  const normalized = normalizeBytes(bytes);
+  if (
+    normalized.length >= 8 &&
+    normalized[0] === 137 &&
+    normalized[1] === 80 &&
+    normalized[2] === 78 &&
+    normalized[3] === 71
+  ) {
+    return "image/png";
+  }
+  if (normalized.length >= 3 && normalized[0] === 255 && normalized[1] === 216 && normalized[2] === 255) {
+    return "image/jpeg";
+  }
+  if (
+    normalized.length >= 12 &&
+    normalized[0] === 82 &&
+    normalized[1] === 73 &&
+    normalized[2] === 70 &&
+    normalized[3] === 70 &&
+    normalized[8] === 87 &&
+    normalized[9] === 69 &&
+    normalized[10] === 66 &&
+    normalized[11] === 80
+  ) {
+    return "image/webp";
+  }
+  if (
+    normalized.length >= 6 &&
+    normalized[0] === 71 &&
+    normalized[1] === 73 &&
+    normalized[2] === 70
+  ) {
+    return "image/gif";
+  }
+  return "image/png";
+}
+
+async function loadImageFromBytes(bytes, mimeType) {
+  if (typeof document === "undefined") {
+    throw new Error("이미지 크기 보정을 위한 문서 컨텍스트를 찾지 못했습니다.");
+  }
+  const image = typeof Image === "function" ? new Image() : document.createElement("img");
+  const source = `data:${mimeType || detectImageMimeType(bytes)};base64,${encodeBytesToBase64(bytes)}`;
+  await new Promise((resolve, reject) => {
+    image.onload = resolve;
+    image.onerror = () => reject(new Error("AI 결과 이미지를 크기 보정용 캔버스에 불러오지 못했습니다."));
+    image.src = source;
+  });
+  return image;
+}
+
+async function resizeImageBytesToPng(bytes, width, height) {
+  const targetWidth = roundPixel(width);
+  const targetHeight = roundPixel(height);
+  if (targetWidth <= 0 || targetHeight <= 0) {
+    return normalizeBytes(bytes);
+  }
+  if (typeof document === "undefined" || typeof document.createElement !== "function") {
+    throw new Error("현재 UXP 환경에서 결과 이미지 크기 보정 캔버스를 만들 수 없습니다.");
+  }
+  const image = await loadImageFromBytes(bytes, detectImageMimeType(bytes));
+  const canvas = document.createElement("canvas");
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  const context = canvas.getContext && canvas.getContext("2d");
+  if (!context || typeof context.drawImage !== "function") {
+    throw new Error("현재 UXP 환경에서 결과 이미지 크기 보정 캔버스를 그릴 수 없습니다.");
+  }
+  context.clearRect(0, 0, targetWidth, targetHeight);
+  context.imageSmoothingEnabled = true;
+  if ("imageSmoothingQuality" in context) {
+    context.imageSmoothingQuality = "high";
+  }
+  context.drawImage(image, 0, 0, targetWidth, targetHeight);
+  const blob = await canvasToPngBlob(canvas);
+  return blobToBytes(blob);
 }
 
 function getAiModelOption(modelId) {
@@ -1498,6 +1584,22 @@ function createPlaceEmbeddedFileCommand(file, placement) {
         _value: Math.round(centerY - canvas.height / 2)
       }
     };
+    if (
+      placement.image &&
+      Number.isFinite(Number(placement.image.width)) &&
+      Number.isFinite(Number(placement.image.height)) &&
+      Number(placement.image.width) > 0 &&
+      Number(placement.image.height) > 0
+    ) {
+      command.width = {
+        _unit: "percentUnit",
+        _value: (bounds.width / Number(placement.image.width)) * 100
+      };
+      command.height = {
+        _unit: "percentUnit",
+        _value: (bounds.height / Number(placement.image.height)) * 100
+      };
+    }
   }
   return command;
 }
@@ -1976,24 +2078,112 @@ function readPngDimensions(bytes) {
   };
 }
 
-async function requestOpenAiUpscale(apiKey, imagePayload, model, prompt) {
+function shouldNormalizeAiResultToSource(actionConfig) {
+  const config = actionConfig || AI_ACTION_CONFIGS.upscale;
+  return config.id !== "upscale";
+}
+
+async function prepareAiResultForPlacement(resultBytes, imagePayload, actionConfig) {
+  const sourceWidth = roundPixel((imagePayload && imagePayload.width) || (imagePayload && imagePayload.bounds && imagePayload.bounds.width));
+  const sourceHeight = roundPixel((imagePayload && imagePayload.height) || (imagePayload && imagePayload.bounds && imagePayload.bounds.height));
+  const currentDimensions = readPngDimensions(resultBytes);
+  if (!shouldNormalizeAiResultToSource(actionConfig) || sourceWidth <= 0 || sourceHeight <= 0) {
+    return {
+      bytes: resultBytes,
+      dimensions: currentDimensions
+    };
+  }
+  if (currentDimensions && currentDimensions.width === sourceWidth && currentDimensions.height === sourceHeight) {
+    return {
+      bytes: resultBytes,
+      dimensions: currentDimensions
+    };
+  }
+  try {
+    const normalizedBytes = await resizeImageBytesToPng(resultBytes, sourceWidth, sourceHeight);
+    return {
+      bytes: normalizedBytes,
+      dimensions: {
+        width: sourceWidth,
+        height: sourceHeight
+      }
+    };
+  } catch (error) {
+    console.warn("Could not normalize AI result image to source size.", error);
+    return {
+      bytes: resultBytes,
+      dimensions: currentDimensions
+    };
+  }
+}
+
+function supportsOpenAiInputFidelity(model) {
+  return String(model || DEFAULT_OPENAI_IMAGE_MODEL).trim() !== "gpt-image-2";
+}
+
+function createAiCancelController() {
+  if (typeof AbortController === "function") {
+    const controller = new AbortController();
+    return {
+      signal: controller.signal,
+      abort: () => controller.abort()
+    };
+  }
+  const signal = { aborted: false };
+  return {
+    signal,
+    abort: () => {
+      signal.aborted = true;
+    }
+  };
+}
+
+function getAbortSignalForFetch(cancelSignal) {
+  return cancelSignal && typeof cancelSignal.addEventListener === "function" ? cancelSignal : null;
+}
+
+function throwIfAiCancelled(cancelSignal) {
+  if (cancelSignal && cancelSignal.aborted) {
+    const error = new Error("작업이 취소되었습니다.");
+    error.name = "AbortError";
+    error.code = "AI_CANCELLED";
+    throw error;
+  }
+}
+
+function isAiCancelError(error) {
+  return Boolean(error && (error.name === "AbortError" || error.code === "AI_CANCELLED"));
+}
+
+async function requestOpenAiUpscale(apiKey, imagePayload, model, prompt, cancelSignal) {
+  throwIfAiCancelled(cancelSignal);
+  const resolvedModel = model || DEFAULT_OPENAI_IMAGE_MODEL;
   const formData = new FormData();
-  formData.append("model", model || DEFAULT_OPENAI_IMAGE_MODEL);
+  formData.append("model", resolvedModel);
   formData.append("image", imagePayload.blob, imagePayload.fileName || "fhotoshop-source.png");
   formData.append("prompt", prompt || IMAGE_UPSCALE_PROMPT);
   formData.append("size", pickOpenAiOutputSize(imagePayload));
   formData.append("quality", "high");
   formData.append("output_format", "png");
-  formData.append("input_fidelity", "high");
+  if (supportsOpenAiInputFidelity(resolvedModel)) {
+    formData.append("input_fidelity", "high");
+  }
   formData.append("n", "1");
 
-  const response = await fetch("https://api.openai.com/v1/images/edits", {
+  const requestOptions = {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`
     },
     body: formData
-  });
+  };
+  const fetchSignal = getAbortSignalForFetch(cancelSignal);
+  if (fetchSignal) {
+    requestOptions.signal = fetchSignal;
+  }
+
+  const response = await fetch("https://api.openai.com/v1/images/edits", requestOptions);
+  throwIfAiCancelled(cancelSignal);
 
   if (!response.ok) {
     throw new Error(await buildImageRequestError(response, "OpenAI 이미지 업스케일 요청 실패"));
@@ -2013,9 +2203,11 @@ async function requestOpenAiUpscale(apiKey, imagePayload, model, prompt) {
   return decodeBase64Image(firstEntry.b64_json);
 }
 
-async function requestGeminiUpscale(apiKey, imagePayload, model, prompt) {
+async function requestGeminiUpscale(apiKey, imagePayload, model, prompt, cancelSignal) {
+  throwIfAiCancelled(cancelSignal);
   const inputBytes = await blobToBytes(imagePayload.blob);
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model || DEFAULT_GEMINI_IMAGE_MODEL)}:generateContent`, {
+  throwIfAiCancelled(cancelSignal);
+  const requestOptions = {
     method: "POST",
     headers: {
       "x-goog-api-key": apiKey,
@@ -2044,7 +2236,14 @@ async function requestGeminiUpscale(apiKey, imagePayload, model, prompt) {
         }
       }
     })
-  });
+  };
+  const fetchSignal = getAbortSignalForFetch(cancelSignal);
+  if (fetchSignal) {
+    requestOptions.signal = fetchSignal;
+  }
+
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model || DEFAULT_GEMINI_IMAGE_MODEL)}:generateContent`, requestOptions);
+  throwIfAiCancelled(cancelSignal);
 
   if (!response.ok) {
     throw new Error(await buildImageRequestError(response, "Gemini 이미지 업스케일 요청 실패"));
@@ -2094,7 +2293,9 @@ async function placeUpscaledImageFile(file, sourceDoc, placement, actionConfig) 
     }
     const result = await action.batchPlay(commands, { synchronousExecution: false });
     assertBatchPlayResult(result, "업스케일링 결과 배치 실패");
-    await fitLayerToBounds(getFirstActiveLayer(sourceDoc || app.activeDocument), placement && placement.bounds);
+    if (!placement || placement.fitAfterPlace !== false) {
+      await fitLayerToBounds(getFirstActiveLayer(sourceDoc || app.activeDocument), placement && placement.bounds);
+    }
     if (config.clipToSourceLayer !== false) {
       await createActiveLayerClippingMask();
     }
@@ -2104,8 +2305,9 @@ async function placeUpscaledImageFile(file, sourceDoc, placement, actionConfig) 
   });
 }
 
-async function runAiImageUpscale(providerInfo, onProgress, actionConfig) {
+async function runAiImageUpscale(providerInfo, onProgress, actionConfig, cancelSignal) {
   const config = actionConfig || AI_ACTION_CONFIGS.upscale;
+  throwIfAiCancelled(cancelSignal);
   const sourceDoc = app.activeDocument;
   if (!sourceDoc) {
     throw new Error(`${config.label}할 포토샵 문서를 먼저 열어주세요.`);
@@ -2113,7 +2315,9 @@ async function runAiImageUpscale(providerInfo, onProgress, actionConfig) {
 
   const selectedLayer = getSelectedLayerForUpscale(sourceDoc);
   onProgress(`선택 레이어 "${getLayerDisplayName(selectedLayer)}" 인식 중입니다.`, 15);
+  throwIfAiCancelled(cancelSignal);
   const imagePayload = await captureSelectedLayerPng(sourceDoc, selectedLayer, config);
+  throwIfAiCancelled(cancelSignal);
   onProgress(
     imagePayload.captureMode === "document-context"
       ? (imagePayload.usedSelection ? "선택 영역의 현재 합성본을 API 입력으로 준비했습니다." : "선택 레이어 주변 합성본을 API 입력으로 준비했습니다.")
@@ -2121,16 +2325,27 @@ async function runAiImageUpscale(providerInfo, onProgress, actionConfig) {
     35
   );
   onProgress(`${providerInfo.label} ${providerInfo.model}로 "${imagePayload.layerName}" ${config.label} 중입니다.`, 55);
+  throwIfAiCancelled(cancelSignal);
   const resultBytes =
     providerInfo.provider === "gemini"
-      ? await requestGeminiUpscale(providerInfo.apiKey, imagePayload, providerInfo.model, config.prompt)
-      : await requestOpenAiUpscale(providerInfo.apiKey, imagePayload, providerInfo.model, config.prompt);
+      ? await requestGeminiUpscale(providerInfo.apiKey, imagePayload, providerInfo.model, config.prompt, cancelSignal)
+      : await requestOpenAiUpscale(providerInfo.apiKey, imagePayload, providerInfo.model, config.prompt, cancelSignal);
+  throwIfAiCancelled(cancelSignal);
   onProgress("AI 응답 이미지를 받았습니다.", 85);
   onProgress(`${config.label} 결과를 포토샵 문서에 배치 중입니다.`, 92);
   onProgress(`${config.label} 결과를 원본 위치와 실루엣에 맞춰 배치 중입니다.`, 93);
-  const resultFile = await writeTemporaryPngFile(resultBytes, `${config.filePrefix || "fhotoshop-ai-result"}-${Date.now()}.png`);
+  throwIfAiCancelled(cancelSignal);
+  const placementResult = await prepareAiResultForPlacement(resultBytes, imagePayload, config);
+  const resultDimensions = placementResult.dimensions;
+  const resultFile = await writeTemporaryPngFile(placementResult.bytes, `${config.filePrefix || "fhotoshop-ai-result"}-${Date.now()}.png`);
+  throwIfAiCancelled(cancelSignal);
   await placeUpscaledImageFile(resultFile, sourceDoc, {
     bounds: imagePayload.bounds,
+    fitAfterPlace: false,
+    image: resultDimensions || {
+      width: imagePayload.width,
+      height: imagePayload.height
+    },
     canvas: {
       width: roundPixel(sourceDoc.width),
       height: roundPixel(sourceDoc.height)
@@ -2142,7 +2357,7 @@ async function runAiImageUpscale(providerInfo, onProgress, actionConfig) {
     model: providerInfo.model,
     actionLabel: config.label,
     layerName: imagePayload.layerName,
-    canvas: readPngDimensions(resultBytes)
+    canvas: resultDimensions
   };
 }
 
@@ -2384,6 +2599,7 @@ function App() {
   const [selectedAiActionId, setSelectedAiActionId] = useState("upscale");
   const [selectedAiModelId, setSelectedAiModelId] = useState(() => readStoredApiKey(API_KEY_STORAGE_KEYS.aiModel) || AI_MODEL_OPTIONS[0].id);
   const [aiModelDialogOpen, setAiModelDialogOpen] = useState(false);
+  const [aiCancelRequested, setAiCancelRequested] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("PSD/PSB, PNG, GIF, JPG 등 이미지 파일이나 ZIP을 선택하세요.");
   const [lastResultSize, setLastResultSize] = useState(null);
@@ -2393,6 +2609,7 @@ function App() {
   const [selectedIds, setSelectedIds] = useState([]);
   const [selectionAnchorId, setSelectionAnchorId] = useState(null);
   const [marquee, setMarquee] = useState(null);
+  const aiCancelControllerRef = useRef(null);
   const marqueeRef = useRef(null);
   const marqueeActive = Boolean(marquee);
 
@@ -2925,6 +3142,16 @@ function App() {
     setAiModelDialogOpen(false);
   }
 
+  function cancelAiAction() {
+    const cancelController = aiCancelControllerRef.current;
+    if (!busy || !cancelController) {
+      return;
+    }
+    setAiCancelRequested(true);
+    updateAiActionStatus("취소 요청 중입니다.", aiProgress);
+    cancelController.abort();
+  }
+
   async function startAiUpscaleWithModel(modelId) {
     const actionConfig = getAiActionConfig(selectedAiActionId) || AI_ACTION_CONFIGS.upscale;
     const providerInfo = resolveUpscaleProvider(gptApiKey, geminiApiKey, modelId);
@@ -2940,18 +3167,29 @@ function App() {
 
     writeStoredApiKey(API_KEY_STORAGE_KEYS.aiModel, modelId);
     setAiModelDialogOpen(false);
+    const cancelController = createAiCancelController();
+    aiCancelControllerRef.current = cancelController;
+    setAiCancelRequested(false);
     setBusy(true);
     setApiKeyStatus("");
     setLastResultSize(null);
     updateAiActionStatus(`${providerInfo.label} ${providerInfo.model} ${actionConfig.label}을 시작합니다.`, 8);
     try {
-      const result = await runAiImageUpscale(providerInfo, (message, progress) => updateAiActionStatus(message, progress), actionConfig);
+      const result = await runAiImageUpscale(providerInfo, (message, progress) => updateAiActionStatus(message, progress), actionConfig, cancelController.signal);
       setLastResultSize(result.canvas);
       updateAiActionStatus(`완료: ${result.provider} ${result.model} ${result.actionLabel} 결과를 "${result.layerName}" 위에 새 레이어로 추가했습니다.`, 100);
     } catch (error) {
-      console.error(error);
-      updateAiActionStatus(error && error.message ? error.message : String(error), 0);
+      if (isAiCancelError(error) || (cancelController.signal && cancelController.signal.aborted)) {
+        updateAiActionStatus("취소되었습니다.", 0);
+      } else {
+        console.error(error);
+        updateAiActionStatus(error && error.message ? error.message : String(error), 0);
+      }
     } finally {
+      if (aiCancelControllerRef.current === cancelController) {
+        aiCancelControllerRef.current = null;
+      }
+      setAiCancelRequested(false);
       setBusy(false);
     }
   }
@@ -3226,13 +3464,20 @@ function App() {
             </section>
           )}
           <section className={`ai-status ai-bottom-panel ${busy ? "running" : ""}`} aria-live="polite">
-            <div className="ai-progress-row">
-              <span>{aiActionStatus}</span>
-              <strong>{busy ? `${aiProgress}%` : aiProgress === 100 ? "완료" : ""}</strong>
+            <div className="ai-progress-row" style={{ alignItems: "flex-start", gap: 0 }}>
+              <span style={{ flex: "1 1 auto", minWidth: 0, paddingRight: 72 }}>{aiActionStatus}</span>
+              <strong style={{ flex: "0 0 72px", textAlign: "right" }}>{busy ? `${aiProgress}%` : aiProgress === 100 ? "완료" : ""}</strong>
             </div>
             {busy && (
-              <div className="ai-progress-track" aria-hidden="true">
+              <div className="ai-progress-track" aria-hidden="true" style={{ marginTop: 20 }}>
                 <div className="ai-progress-fill" style={{ width: `${Math.max(0, Math.min(100, aiProgress))}%` }} />
+              </div>
+            )}
+            {busy && (
+              <div className="ai-run-actions" style={{ marginTop: 0, paddingTop: 28 }}>
+                <ControlButton className="secondary ai-run-cancel" onClick={cancelAiAction} disabled={aiCancelRequested}>
+                  {aiCancelRequested ? "취소 중" : "취소"}
+                </ControlButton>
               </div>
             )}
             {lastResultSize && <em>최근 결과 크기: {lastResultSize.width} x {lastResultSize.height}px</em>}
